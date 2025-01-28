@@ -15,5 +15,8 @@
     "url": "https://github.com/Protospi/drope-api/issues"
   },
   "homepage": "https://github.com/Protospi/drope-api#readme",
-  "description": ""
+  "description": "",
+  "dependencies": {
+    "express": "^4.21.2"
+  }
 }

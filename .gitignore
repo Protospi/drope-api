@@ -1,2 +1,15 @@
+
+# node_modules
+node_modules/
+
+# .env file
 .env
+
+# .DS_Store
+.DS_Store
+
+# helper.txt
+helper.txt
+
+# pem key
 drope-api-key.pem
