@@ -1,7 +1,7 @@
-const User = require('../models/User');
+import User from '../models/User.js';
 
 // Get all users
-exports.getAllUsers = async (req, res) => {
+const getAllUsers = async (req, res) => {
   try {
     const users = await User.find().select('-password');
     res.json(users);
@@ -11,7 +11,7 @@ exports.getAllUsers = async (req, res) => {
 };
 
 // Get user by ID
-exports.getUserById = async (req, res) => {
+const getUserById = async (req, res) => {
   try {
     const user = await User.findById(req.params.id).select('-password');
     if (!user) {
@@ -24,7 +24,7 @@ exports.getUserById = async (req, res) => {
 };
 
 // Create new user
-exports.createUser = async (req, res) => {
+const createUser = async (req, res) => {
   try {
     console.log('Request body:', req.body);
     const user = new User(req.body);
@@ -42,7 +42,7 @@ exports.createUser = async (req, res) => {
 };
 
 // Update user
-exports.updateUser = async (req, res) => {
+const updateUser = async (req, res) => {
   try {
     const user = await User.findByIdAndUpdate(
       req.params.id,
@@ -59,7 +59,7 @@ exports.updateUser = async (req, res) => {
 };
 
 // Delete user
-exports.deleteUser = async (req, res) => {
+const deleteUser = async (req, res) => {
   try {
     console.log('Attempting to delete user with ID:', req.params.id);
     const user = await User.findByIdAndDelete(req.params.id);
@@ -79,4 +79,6 @@ exports.deleteUser = async (req, res) => {
       details: error.stack 
     });
   }
-}; 
+};
+
+export { getAllUsers, getUserById, createUser, updateUser, deleteUser }; 

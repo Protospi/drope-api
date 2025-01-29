@@ -1,7 +1,9 @@
-const express = require('express')
-const dotenv = require('dotenv')
-const connectDB = require('./src/config/database')
-const userRoutes = require('./src/routes/userRoutes')
+import express from 'express'
+import dotenv from 'dotenv'
+import connectDB from './src/config/database.js'
+import userRoutes from './src/routes/userRoutes.js'
+import scheduleRoutes from './src/routes/scheduleRoutes.js'
+import cors from 'cors'
 
 // Load environment variables
 dotenv.config()
@@ -10,6 +12,7 @@ const app = express()
 const PORT = process.env.PORT || 8000
 
 // Middleware
+app.use(cors())
 app.use(express.json())
 app.use(express.urlencoded({ extended: true }))
 
@@ -21,6 +24,7 @@ app.use((req, res, next) => {
 
 // Routes
 app.use('/api/users', userRoutes)
+app.use('/api/schedule', scheduleRoutes)
 
 // Base route
 app.get('/', (req, res) => {
