@@ -1,4 +1,3 @@
-
 # node_modules
 node_modules/
 
@@ -13,3 +12,5 @@ helper.txt
 
 # pem key
 drope-api-key.pem
+
+scripts/
