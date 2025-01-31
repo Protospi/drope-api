@@ -9,6 +9,10 @@ const slotSchema = new mongoose.Schema({
     type: String,
     default: ''
   },
+  company: {
+    type: String,
+    default: ''
+  },
   subject: {
     type: String,
     default: ''

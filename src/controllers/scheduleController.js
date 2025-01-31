@@ -19,7 +19,7 @@ const conversationalAgent = async (req, res) => {
 
     const stream = await openai.chat.completions.create({
       messages: messages,
-      model: "gpt-4o-mini",
+      model: "gpt-4o",
       stream: true,
     });
 
@@ -60,9 +60,9 @@ const getAllSchedules = async (req, res) => {
   }
 };
 
-const getScheduleByDate = async (req, res) => {
+// Internal function for getting schedule by date
+const getScheduleByDateInternal = async (date) => {
   try {
-    const { date } = req.params;
     const startDate = new Date(date);
     startDate.setHours(0, 0, 0, 0);
     
@@ -76,11 +76,23 @@ const getScheduleByDate = async (req, res) => {
       }
     });
 
+    return schedule;
+  } catch (error) {
+    throw error;
+  }
+};
+
+// Modified route handler that uses the internal function
+const getScheduleByDate = async (req, res) => {
+  try {
+    const { date } = req.params;
+    const schedule = await getScheduleByDateInternal(date);
+    
     if (!schedule) {
       return res.status(404).json({ message: 'Não há agendamento disponível para esta data' });
     }
 
-    return schedule;
+    res.json(schedule);
 
   } catch (error) {
     console.error('Error fetching schedule by date:', error);
@@ -93,7 +105,7 @@ const getScheduleByDate = async (req, res) => {
 
 const bookSlot = async (req, res) => {
   try {
-    const { date, time, clientName } = req.body;
+    const { date, time, clientName, company, subject } = req.body;
 
     const schedule = await Schedule.findOne({
       date: new Date(date)
@@ -113,6 +125,8 @@ const bookSlot = async (req, res) => {
     }
 
     slot.clientName = clientName;
+    slot.company = company;
+    slot.subject = subject;
     slot.status = 'booked';
 
     await schedule.save();
@@ -144,6 +158,7 @@ const cancelBooking = async (req, res) => {
     }
 
     slot.clientName = '';
+    slot.subject = '';
     slot.status = 'available';
 
     await schedule.save();
@@ -177,12 +192,24 @@ const tools = [{
           "type": "string",
           "description": "Name of the client booking the slot"
         },
+        "checkout": {
+          "type": "boolean",
+          "description": "Assistant provide a summary of the booking and ask if the user wants to checkout"
+        },
+        "confirmation": {
+          "type": "boolean",
+          "description": "The user cofirmed the booking"
+        },
         "subject": {
           "type": "string",
-          "description": "Subject or purpose of the meeting"
+          "description": "Subject or purpose of the meeting describe by the user"
+        },
+        "company": {
+          "type": "string",
+          "description": "Company name"
         }
       },
-      "required": ["date", "time", "clientName", "subject"],
+      "required": ["date", "time", "clientName", "subject", "checkout", "confirmation", "company"],
       "additionalProperties": false
     },
     "strict": true
@@ -220,9 +247,17 @@ const tools = [{
         "time": {
           "type": "string",
           "description": "Time slot in HH:mm format (24h)"
+        },
+        "checkout": {
+          "type": "boolean",
+          "description": "Assistant provide a summary of the booking cancellation and ask if the user wants to confirm the cancellation"
+        },
+        "confirmation": {
+          "type": "boolean",
+          "description": "The user cofirmed the cancellation"
         }
       },
-      "required": ["date", "time"],
+      "required": ["date", "time", "checkout", "confirmation"],
       "additionalProperties": false
     },
     "strict": true
@@ -238,7 +273,7 @@ const scheduleAgent = async (req, res) => {
 
     const completion = await openai.chat.completions.create({
       messages: messages,
-      model: "gpt-4o-mini",
+      model: "gpt-4o",
       tools,
       stream: false,
     });
@@ -262,7 +297,9 @@ const scheduleAgent = async (req, res) => {
                 body: {
                   date: args.date,
                   time: args.time,
-                  clientName: args.clientName
+                  clientName: args.clientName,
+                  company: args.company,
+                  subject: args.subject
                 }
               }, {
                 json: (data) => data,
@@ -277,31 +314,34 @@ const scheduleAgent = async (req, res) => {
               break;
 
             case 'getScheduleByDate':
-              const scheduleResult = await getScheduleByDate({
-                params: { date: args.date }
-              }, {
-                json: (data) => data,
-                status: (code) => ({ json: (data) => data })
-              });
-              
-              if (!scheduleResult) {
+              try {
+                const scheduleResult = await getScheduleByDateInternal(args.date);
+                
+                if (!scheduleResult) {
+                  response.functionResult = {
+                    type: 'schedule',
+                    message: `Não há agenda disponível para ${args.date}.`,
+                    data: null
+                  };
+                  break;
+                }
+
+                const availableSlots = scheduleResult.slots
+                  .filter(slot => slot.status === 'available')
+                  .map(slot => slot.time);
+
                 response.functionResult = {
                   type: 'schedule',
-                  message: `Não há agenda disponível para ${args.date}.`,
-                  data: null
+                  message: `Agenda disponível para ${args.date}: ${availableSlots.join(', ')}`,
+                  data: scheduleResult,
+                  date: args.date
                 };
-                break;
+              } catch (error) {
+                response.error = {
+                  message: `Error processing request: ${error.message}`,
+                  details: error
+                };
               }
-
-              const availableSlots = scheduleResult.slots
-                .filter(slot => slot.status === 'available')
-                .map(slot => slot.time);
-
-              response.functionResult = {
-                type: 'schedule',
-                message: `Agenda disponível para ${args.date}: ${availableSlots.join(', ')}`,
-                data: scheduleResult
-              };
               break;
 
             case 'cancelBooking':
@@ -346,7 +386,8 @@ const scheduleAgent = async (req, res) => {
 export { 
   conversationalAgent, 
   getAllSchedules, 
-  getScheduleByDate, 
+  getScheduleByDate,
+  getScheduleByDateInternal,
   bookSlot, 
   cancelBooking,
   scheduleAgent 
