@@ -1,8 +1,9 @@
 import { OpenAI } from 'openai';
 import dotenv from 'dotenv';
 import Schedule from '../models/Schedule.js';
-import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { Readable } from 'stream';
+import crypto from 'crypto';
 
 dotenv.config();
 
@@ -132,19 +133,52 @@ async function getFileFromS3(url) {
   return response.Body;
 }
 
-const conversationalAgent = async (req, res) => {
+// Add this helper function after the getFileFromS3 function
+async function uploadFileToS3(buffer, contentType) {
+  const fileName = `audio-${crypto.randomBytes(8).toString('hex')}.mp3`;
   
+  const command = new PutObjectCommand({
+    Bucket: process.env.AWS_BUCKET_NAME,
+    Key: fileName,
+    Body: buffer,
+    ContentType: contentType
+  });
+
+  await s3Client.send(command);
+  return `https://${process.env.AWS_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${fileName}`;
+}
+
+const conversationalAgent = async (req, res) => {
   try {
     const { messages, userMessage, input } = req.body;
-    // console.log(req.body)
 
-    if(input.type === "text") {
-        messages.push({ role: "user", content: input.content });
-    } else if(input.type === "audio") {
-      // Get the audio file from S3
-      const audioStream = await getFileFromS3(input.content);
+    if (input.type === "text") {
+      messages.push({ role: "user", content: input.content });
       
-      // Convert the stream to a format that OpenAI can accept
+      // Set headers for streaming
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+
+      const stream = await openai.chat.completions.create({
+        messages: messages,
+        model: "gpt-4",
+        stream: true,
+      });
+
+      // Stream the response
+      for await (const chunk of stream) {
+        const content = chunk.choices[0]?.delta?.content || "";
+        if (content) {
+          res.write(`data: ${JSON.stringify({ content })}\n\n`);
+        }
+      }
+      
+      res.end();
+
+    } else if (input.type === "audio") {
+      // Get the audio file from S3 and transcribe it
+      const audioStream = await getFileFromS3(input.content);
       const buffer = await new Promise((resolve, reject) => {
         const chunks = [];
         audioStream.on('data', chunk => chunks.push(chunk));
@@ -152,46 +186,44 @@ const conversationalAgent = async (req, res) => {
         audioStream.on('error', reject);
       });
 
-      // Create a File object that OpenAI's API can accept
       const file = new File([buffer], 'audio.wav', { type: 'audio/wav' });
-      
       const transcription = await openai.audio.transcriptions.create({
         file: file,
         model: "whisper-1",
         response_format: "text",
       });
 
-      // console.log(transcription)
       messages.push({ role: "user", content: transcription });
+
+      // Get chat completion
+      const completion = await openai.chat.completions.create({
+        messages: messages,
+        model: "gpt-4",
+        stream: false,
+      });
+
+      const assistantResponse = completion.choices[0].message.content;
+
+      // Generate speech from the assistant's response
+      const mp3 = await openai.audio.speech.create({
+        model: "tts-1",
+        voice: "alloy",
+        input: assistantResponse,
+      });
+
+      // Convert the audio to a buffer and upload to S3
+      const audioBuffer = Buffer.from(await mp3.arrayBuffer());
+      const audioUrl = await uploadFileToS3(audioBuffer, 'audio/mpeg');
+
+      // Send both the text response and audio URL
+      res.json({
+        text: assistantResponse,
+        audioUrl: audioUrl
+      });
     }
-
-    // Set headers for streaming
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-
-    // console.log(messages)
-    const stream = await openai.chat.completions.create({
-      messages: messages,
-      model: "gpt-4o",
-      stream: true,
-    });
-
-    // Stream the response
-    for await (const chunk of stream) {
-      const content = chunk.choices[0]?.delta?.content || "";
-      if (content) {
-        // Send the chunk as a Server-Sent Event
-        res.write(`data: ${JSON.stringify({ content })}\n\n`);
-      }
-    }
-    
-    // End the response
-    res.end();
 
   } catch (error) {
     console.error('Error in chat API:', error);
-    // Send more detailed error information
     return res.status(500).json({ 
       error: 'Internal server error', 
       message: error.message,
