@@ -63,12 +63,13 @@ const getAllSchedules = async (req, res) => {
 // Internal function for getting schedule by date
 const getScheduleByDateInternal = async (date) => {
   try {
-    const startDate = new Date(date);
-    startDate.setHours(0, 0, 0, 0);
-    
-    const endDate = new Date(date);
-    endDate.setHours(23, 59, 59, 999);
+    console.log("date", date)
+    // Create date objects and force them to UTC
+    const startDate = new Date(date + 'T00:00:00.000Z');
+    const endDate = new Date(date + 'T23:59:59.999Z');
 
+    console.log("startDate", startDate)
+    console.log("endDate", endDate)
     const schedule = await Schedule.findOne({
       date: {
         $gte: startDate,
@@ -194,11 +195,11 @@ const tools = [{
         },
         "checkout": {
           "type": "boolean",
-          "description": "Assistant provide a summary of the booking and ask if the user wants to checkout"
+          "description": "Assistant provided a summary of the booking and ask if the user wants to checkout should be true"
         },
         "confirmation": {
           "type": "boolean",
-          "description": "The user cofirmed the booking"
+          "description": "The user cofirmation of the date and time should be true"
         },
         "subject": {
           "type": "string",
@@ -309,7 +310,8 @@ const scheduleAgent = async (req, res) => {
               response.functionResult = {
                 type: 'booking',
                 message: `Reunião agendada para ${args.clientName} em ${args.date} às ${args.time} para ${args.subject} foi confirmada com sucesso.`,
-                data: bookingResult
+                data: bookingResult,
+                args: args
               };
               break;
 
@@ -321,7 +323,8 @@ const scheduleAgent = async (req, res) => {
                   response.functionResult = {
                     type: 'schedule',
                     message: `Não há agenda disponível para ${args.date}.`,
-                    data: null
+                    data: null,
+                    args: `Os argumentos capturados foram: ${JSON.stringify(args)}`
                   };
                   break;
                 }
