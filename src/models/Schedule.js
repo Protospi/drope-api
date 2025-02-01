@@ -5,7 +5,11 @@ const slotSchema = new mongoose.Schema({
     type: String,
     required: true
   },
-  clientName: {
+  name: {
+    type: String,
+    default: ''
+  },
+  email: {
     type: String,
     default: ''
   },

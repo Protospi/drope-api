@@ -18,6 +18,7 @@
   "homepage": "https://github.com/Protospi/drope-api#readme",
   "description": "",
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.740.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",

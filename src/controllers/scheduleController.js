@@ -1,22 +1,176 @@
 import { OpenAI } from 'openai';
 import dotenv from 'dotenv';
 import Schedule from '../models/Schedule.js';
+import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
+import { Readable } from 'stream';
 
 dotenv.config();
+
+// Initialize S3 client
+const s3Client = new S3Client({
+  region: process.env.AWS_REGION,
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
+  }
+});
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
+const tools = [{
+    "type": "function",
+    "function": {
+      "name": "bookSlot",
+      "description": "Book a time slot in the schedule after user confirmation",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "date": {
+            "type": "string",
+            "description": "Date in YYYY-MM-DD format"
+          },
+          "time": {
+            "type": "string",
+            "description": "Time slot in HH:mm format (24h)"
+          },
+          "name": {
+            "type": "string",
+            "description": "Name of the client booking the slot"
+          },
+          "email": {
+            "type": "string",
+            "description": "Email of the client booking the slot"
+          },
+          "checkout": {
+            "type": "boolean",
+            "description": "Assistant provided a summary of the booking and ask if the user wants to checkout should be true"
+          },
+          "confirmation": {
+            "type": "boolean",
+            "description": "The user cofirmation of the last checkout should be true"
+          },
+          "subject": {
+            "type": "string",
+            "description": "Subject or purpose of the meeting describe by the user"
+          },
+          "company": {
+            "type": "string",
+            "description": "Company name"
+          }
+        },
+        "required": ["date", "time", "name", "email", "subject", "checkout", "confirmation", "company"],
+        "additionalProperties": false
+      },
+      "strict": true
+    }
+  }, {
+    "type": "function",
+    "function": {
+      "name": "getScheduleByDate",
+      "description": "Check if a specific time slot is available on a given date",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "date": {
+            "type": "string",
+            "description": "Date in YYYY-MM-DD format"
+          }
+        },
+        "required": ["date"],
+        "additionalProperties": false
+      },
+      "strict": true
+    }
+  }, {
+    "type": "function",
+    "function": {
+      "name": "cancelBooking",
+      "description": "Cancel an existing appointment",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "date": {
+            "type": "string",
+            "description": "Date in YYYY-MM-DD format"
+          },
+          "time": {
+            "type": "string",
+            "description": "Time slot in HH:mm format (24h)"
+          },
+          "checkout": {
+            "type": "boolean",
+            "description": "Assistant provide a summary of the booking cancellation and ask if the user wants to confirm the cancellation"
+          },
+          "confirmation": {
+            "type": "boolean",
+            "description": "The user cofirmed the last checkout cancellation should be true"
+          }
+        },
+        "required": ["date", "time", "checkout", "confirmation"],
+        "additionalProperties": false
+      },
+      "strict": true
+    }
+  }];
+
+// Helper function to get file from S3
+async function getFileFromS3(url) {
+  const matches = url.match(/s3\..*\.amazonaws\.com\/(.*)/);
+  if (!matches) throw new Error('Invalid S3 URL');
+  
+  const key = matches[1];
+  const bucket = process.env.AWS_BUCKET_NAME;
+
+  const command = new GetObjectCommand({
+    Bucket: bucket,
+    Key: key,
+  });
+
+  const response = await s3Client.send(command);
+  return response.Body;
+}
+
 const conversationalAgent = async (req, res) => {
-  console.log('Endpoint hit: /api/schedule/conversational-agent');
+  
   try {
-    const { messages } = req.body;
+    const { messages, userMessage, input } = req.body;
+    // console.log(req.body)
+
+    if(input.type === "text") {
+        messages.push({ role: "user", content: input.content });
+    } else if(input.type === "audio") {
+      // Get the audio file from S3
+      const audioStream = await getFileFromS3(input.content);
+      
+      // Convert the stream to a format that OpenAI can accept
+      const buffer = await new Promise((resolve, reject) => {
+        const chunks = [];
+        audioStream.on('data', chunk => chunks.push(chunk));
+        audioStream.on('end', () => resolve(Buffer.concat(chunks)));
+        audioStream.on('error', reject);
+      });
+
+      // Create a File object that OpenAI's API can accept
+      const file = new File([buffer], 'audio.wav', { type: 'audio/wav' });
+      
+      const transcription = await openai.audio.transcriptions.create({
+        file: file,
+        model: "whisper-1",
+        response_format: "text",
+      });
+
+      // console.log(transcription)
+      messages.push({ role: "user", content: transcription });
+    }
+
     // Set headers for streaming
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
 
+    // console.log(messages)
     const stream = await openai.chat.completions.create({
       messages: messages,
       model: "gpt-4o",
@@ -46,6 +200,156 @@ const conversationalAgent = async (req, res) => {
   }
 };
 
+const scheduleAgent = async (req, res) => {
+  
+    let response = { functionResult: { type: "", message: "", data: null}};
+    try {
+  
+        const { messages, userMessage, input } = req.body;
+
+        if(input.type === "text") {
+            messages.push({ role: "user", content: input.content });
+        } else if(input.type === "audio") {
+          // Get the audio file from S3
+          const audioStream = await getFileFromS3(input.content);
+          
+          // Convert the stream to a format that OpenAI can accept
+          const buffer = await new Promise((resolve, reject) => {
+            const chunks = [];
+            audioStream.on('data', chunk => chunks.push(chunk));
+            audioStream.on('end', () => resolve(Buffer.concat(chunks)));
+            audioStream.on('error', reject);
+          });
+    
+          // Create a File object that OpenAI's API can accept
+          const file = new File([buffer], 'audio.wav', { type: 'audio/wav' });
+          
+          const transcription = await openai.audio.transcriptions.create({
+            file: file,
+            model: "whisper-1",
+            response_format: "text",
+          });
+    
+          // console.log(transcription)
+          messages.push({ role: "user", content: transcription });
+        }
+      
+      // console.log(messages)
+      const completion = await openai.chat.completions.create({
+        messages: messages,
+        model: "gpt-4o",
+        tools,
+        stream: false,
+      });
+  
+      let toolCalls = [];
+  
+      if (completion.choices[0].message.tool_calls) {
+        toolCalls = completion.choices[0].message.tool_calls;
+      }
+      console.log(toolCalls)
+  
+      // Check if there are any tool calls
+      if (toolCalls.length > 0) {
+        for (const toolCall of toolCalls) {
+          try {
+            const args = JSON.parse(toolCall.function.arguments);
+            
+            switch(toolCall.function.name) {
+              case 'bookSlot':
+                const bookingResult = await bookSlot({
+                  body: {
+                    date: args.date,
+                    time: args.time,
+                    name: args.name,
+                    email: args.email,
+                    company: args.company,
+                    subject: args.subject
+                  }
+                }, {
+                  json: (data) => data,
+                  status: (code) => ({ json: (data) => data })
+                });
+                
+                response.functionResult = {
+                  type: 'booking',
+                  message: `Reunião agendada para ${args.name} em ${args.date} às ${args.time} para ${args.subject} foi confirmada com sucesso.`,
+                  data: bookingResult,
+                  args: args
+                };
+                break;
+  
+              case 'getScheduleByDate':
+                try {
+                  const scheduleResult = await getScheduleByDateInternal(args.date);
+                  
+                  if (!scheduleResult) {
+                    response.functionResult = {
+                      type: 'schedule',
+                      message: `Não há agenda disponível para ${args.date}.`,
+                      data: null,
+                      args: `Os argumentos capturados foram: ${JSON.stringify(args)}`
+                    };
+                    break;
+                  }
+  
+                  const availableSlots = scheduleResult.slots
+                    .filter(slot => slot.status === 'available')
+                    .map(slot => slot.time);
+  
+                  response.functionResult = {
+                    type: 'schedule',
+                    message: `Agenda disponível para ${args.date}: ${availableSlots.join(', ')}`,
+                    data: scheduleResult,
+                    date: args.date
+                  };
+                } catch (error) {
+                  response.error = {
+                    message: `Error processing request: ${error.message}`,
+                    details: error
+                  };
+                }
+                break;
+  
+              case 'cancelBooking':
+                const cancelResult = await cancelBooking({
+                  body: {
+                    date: args.date,
+                    time: args.time
+                  }
+                }, {
+                  json: (data) => data,
+                  status: (code) => ({ json: (data) => data })
+                });
+                
+                response.functionResult = {
+                  type: 'cancellation',
+                  message: `Reunião agendada para ${args.date} às ${args.time} foi cancelada com sucesso.`,
+                  data: cancelResult
+                };
+                break;
+            }
+          } catch (error) {
+            response.error = {
+              message: `Error processing request: ${error.message}`,
+              details: error
+            };
+          }
+        }
+      }
+      // console.log(response)
+      return res.json(response);
+  
+    } catch (error) {
+      console.error('Error in schedule agent:', error);
+      return res.status(500).json({ 
+        error: 'Internal server error', 
+        message: error.message,
+        stack: process.env.NODE_ENV === 'development' ? error.stack : undefined 
+      });
+    }
+  };
+
 // New schedule management functions
 const getAllSchedules = async (req, res) => {
   try {
@@ -63,13 +367,13 @@ const getAllSchedules = async (req, res) => {
 // Internal function for getting schedule by date
 const getScheduleByDateInternal = async (date) => {
   try {
-    console.log("date", date)
+    //console.log("date", date)
     // Create date objects and force them to UTC
     const startDate = new Date(date + 'T00:00:00.000Z');
     const endDate = new Date(date + 'T23:59:59.999Z');
 
-    console.log("startDate", startDate)
-    console.log("endDate", endDate)
+    //console.log("startDate", startDate)
+    //console.log("endDate", endDate)
     const schedule = await Schedule.findOne({
       date: {
         $gte: startDate,
@@ -106,11 +410,16 @@ const getScheduleByDate = async (req, res) => {
 
 const bookSlot = async (req, res) => {
   try {
-    const { date, time, clientName, company, subject } = req.body;
+    const { date, time, name, email, company, subject } = req.body;
+    
+    // Add 3 hour to the nes date
+    const newDate = new Date(date);
+    newDate.setHours(newDate.getHours() + 3);
 
     const schedule = await Schedule.findOne({
-      date: new Date(date)
+      date: newDate
     });
+    // console.log(schedule)
 
     if (!schedule) {
       return res.status(404).json({ message: 'Schedule not found for this date' });
@@ -124,8 +433,9 @@ const bookSlot = async (req, res) => {
     if (slot.status === 'booked') {
       return res.status(400).json({ message: 'This slot is already booked' });
     }
-
-    slot.clientName = clientName;
+    
+    slot.name = name;
+    slot.email = email;
     slot.company = company;
     slot.subject = subject;
     slot.status = 'booked';
@@ -145,9 +455,15 @@ const cancelBooking = async (req, res) => {
   try {
     const { date, time } = req.body;
 
+    // Add 3 hour to the nes date
+    const newDate = new Date(date);
+    newDate.setHours(newDate.getHours() + 3);
+
     const schedule = await Schedule.findOne({
-      date: new Date(date)
+      date: newDate
     });
+
+    console.log(schedule)
 
     if (!schedule) {
       return res.status(404).json({ message: 'Schedule not found for this date' });
@@ -158,7 +474,9 @@ const cancelBooking = async (req, res) => {
       return res.status(404).json({ message: 'Time slot not found' });
     }
 
-    slot.clientName = '';
+    slot.name = '';
+    slot.email = '';
+    slot.company = '';
     slot.subject = '';
     slot.status = 'available';
 
@@ -173,218 +491,6 @@ const cancelBooking = async (req, res) => {
   }
 };
 
-const tools = [{
-  "type": "function",
-  "function": {
-    "name": "bookSlot",
-    "description": "Book a time slot in the schedule after user confirmation",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "date": {
-          "type": "string",
-          "description": "Date in YYYY-MM-DD format"
-        },
-        "time": {
-          "type": "string",
-          "description": "Time slot in HH:mm format (24h)"
-        },
-        "clientName": {
-          "type": "string",
-          "description": "Name of the client booking the slot"
-        },
-        "checkout": {
-          "type": "boolean",
-          "description": "Assistant provided a summary of the booking and ask if the user wants to checkout should be true"
-        },
-        "confirmation": {
-          "type": "boolean",
-          "description": "The user cofirmation of the date and time should be true"
-        },
-        "subject": {
-          "type": "string",
-          "description": "Subject or purpose of the meeting describe by the user"
-        },
-        "company": {
-          "type": "string",
-          "description": "Company name"
-        }
-      },
-      "required": ["date", "time", "clientName", "subject", "checkout", "confirmation", "company"],
-      "additionalProperties": false
-    },
-    "strict": true
-  }
-}, {
-  "type": "function",
-  "function": {
-    "name": "getScheduleByDate",
-    "description": "Check if a specific time slot is available on a given date",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "date": {
-          "type": "string",
-          "description": "Date in YYYY-MM-DD format"
-        }
-      },
-      "required": ["date"],
-      "additionalProperties": false
-    },
-    "strict": true
-  }
-}, {
-  "type": "function",
-  "function": {
-    "name": "cancelBooking",
-    "description": "Cancel an existing appointment",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "date": {
-          "type": "string",
-          "description": "Date in YYYY-MM-DD format"
-        },
-        "time": {
-          "type": "string",
-          "description": "Time slot in HH:mm format (24h)"
-        },
-        "checkout": {
-          "type": "boolean",
-          "description": "Assistant provide a summary of the booking cancellation and ask if the user wants to confirm the cancellation"
-        },
-        "confirmation": {
-          "type": "boolean",
-          "description": "The user cofirmed the cancellation"
-        }
-      },
-      "required": ["date", "time", "checkout", "confirmation"],
-      "additionalProperties": false
-    },
-    "strict": true
-  }
-}];
-
-const scheduleAgent = async (req, res) => {
-  console.log('Endpoint hit: /api/schedule/schedule-agent');
-  let response = { functionResult: { type: "", message: "", data: null}};
-  try {
-
-    const { messages } = req.body;
-
-    const completion = await openai.chat.completions.create({
-      messages: messages,
-      model: "gpt-4o",
-      tools,
-      stream: false,
-    });
-
-    let toolCalls = [];
-
-    if (completion.choices[0].message.tool_calls) {
-      toolCalls = completion.choices[0].message.tool_calls;
-    }
-    console.log(toolCalls)
-
-    // Check if there are any tool calls
-    if (toolCalls.length > 0) {
-      for (const toolCall of toolCalls) {
-        try {
-          const args = JSON.parse(toolCall.function.arguments);
-          
-          switch(toolCall.function.name) {
-            case 'bookSlot':
-              const bookingResult = await bookSlot({
-                body: {
-                  date: args.date,
-                  time: args.time,
-                  clientName: args.clientName,
-                  company: args.company,
-                  subject: args.subject
-                }
-              }, {
-                json: (data) => data,
-                status: (code) => ({ json: (data) => data })
-              });
-              
-              response.functionResult = {
-                type: 'booking',
-                message: `Reunião agendada para ${args.clientName} em ${args.date} às ${args.time} para ${args.subject} foi confirmada com sucesso.`,
-                data: bookingResult,
-                args: args
-              };
-              break;
-
-            case 'getScheduleByDate':
-              try {
-                const scheduleResult = await getScheduleByDateInternal(args.date);
-                
-                if (!scheduleResult) {
-                  response.functionResult = {
-                    type: 'schedule',
-                    message: `Não há agenda disponível para ${args.date}.`,
-                    data: null,
-                    args: `Os argumentos capturados foram: ${JSON.stringify(args)}`
-                  };
-                  break;
-                }
-
-                const availableSlots = scheduleResult.slots
-                  .filter(slot => slot.status === 'available')
-                  .map(slot => slot.time);
-
-                response.functionResult = {
-                  type: 'schedule',
-                  message: `Agenda disponível para ${args.date}: ${availableSlots.join(', ')}`,
-                  data: scheduleResult,
-                  date: args.date
-                };
-              } catch (error) {
-                response.error = {
-                  message: `Error processing request: ${error.message}`,
-                  details: error
-                };
-              }
-              break;
-
-            case 'cancelBooking':
-              const cancelResult = await cancelBooking({
-                body: {
-                  date: args.date,
-                  time: args.time
-                }
-              }, {
-                json: (data) => data,
-                status: (code) => ({ json: (data) => data })
-              });
-              
-              response.functionResult = {
-                type: 'cancellation',
-                message: `Reunião agendada para ${args.date} às ${args.time} foi cancelada com sucesso.`,
-                data: cancelResult
-              };
-              break;
-          }
-        } catch (error) {
-          response.error = {
-            message: `Error processing request: ${error.message}`,
-            details: error
-          };
-        }
-      }
-    }
-    console.log(response)
-    return res.json(response);
-
-  } catch (error) {
-    console.error('Error in schedule agent:', error);
-    return res.status(500).json({ 
-      error: 'Internal server error', 
-      message: error.message,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined 
-    });
-  }
-};
 
 export { 
   conversationalAgent, 
