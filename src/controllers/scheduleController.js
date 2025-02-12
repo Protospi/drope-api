@@ -46,11 +46,11 @@ const tools = [{
           },
           "checkout": {
             "type": "boolean",
-            "description": "Assistant provided a summary of the booking and ask if the user wants to checkout should be true"
+            "description": "Assistant provided a detailed summary of the booking and ask if the user confirm the booking"
           },
           "confirmation": {
             "type": "boolean",
-            "description": "The user cofirmation of the last checkout should be true"
+            "description": "The user explictly confirm the meeting"
           },
           "subject": {
             "type": "string",
@@ -61,7 +61,7 @@ const tools = [{
             "description": "Company name"
           }
         },
-        "required": ["date", "time", "name", "email", "subject", "checkout", "confirmation", "company"],
+        "required": ["date", "time", "name", "email", "checkout", "confirmation", "subject", "company"],
         "additionalProperties": false
       },
       "strict": true
