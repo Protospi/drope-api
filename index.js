@@ -3,6 +3,7 @@ import dotenv from 'dotenv'
 import connectDB from './src/config/database.js'
 import userRoutes from './src/routes/userRoutes.js'
 import scheduleRoutes from './src/routes/scheduleRoutes.js'
+import scrumPokerRoutes from './src/routes/scrumPokerRoutes.js'
 import cors from 'cors'
 
 // Load environment variables
@@ -25,6 +26,7 @@ app.use((req, res, next) => {
 // Routes
 app.use('/api/users', userRoutes)
 app.use('/api/schedule', scheduleRoutes)
+app.use('/api/scrumpoker', scrumPokerRoutes)
 
 // Base route
 app.get('/', (req, res) => {
