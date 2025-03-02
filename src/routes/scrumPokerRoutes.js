@@ -1,5 +1,12 @@
 import express from 'express';
-import { createScrumPokerRoom, addParticipant, updateVote, calculateAverage, aiVote, getRoom, cleanVotes, updateTaksDescription } from '../controllers/scrumPokerController.js';
+import {createScrumPokerRoom, 
+        addParticipant, 
+        updateVote, 
+        calculateAverage, 
+        aiVote, 
+        getRoom, 
+        cleanVotes, 
+        updateTaksDescription } from '../controllers/scrumPokerController.js';
 
 const router = express.Router();
 
