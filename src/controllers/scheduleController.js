@@ -4,6 +4,8 @@ import Schedule from '../models/Schedule.js';
 import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { Readable } from 'stream';
 import crypto from 'crypto';
+import { google } from 'googleapis';
+import { OAuth2Client } from 'google-auth-library';
 
 dotenv.config();
 
@@ -46,11 +48,11 @@ const tools = [{
           },
           "checkout": {
             "type": "boolean",
-            "description": "Assistant provided a detailed summary of the booking and ask if the user confirm the booking"
+            "description": "Assistant provided a detailed summary checkout of the booking and ask if the user want to confirm the booking"
           },
           "confirmation": {
             "type": "boolean",
-            "description": "The user explictly confirm the meeting"
+            "description": "The user explictly confirm the information of the meeting after the checkout provided by the assistant"
           },
           "subject": {
             "type": "string",
@@ -100,21 +102,51 @@ const tools = [{
             "type": "string",
             "description": "Time slot in HH:mm format (24h)"
           },
+          "name": {
+            "type": "string",
+            "description": "Name of the client booking the slot"
+          },
+          "email": {
+            "type": "string",
+            "description": "Email of the client booking the slot"
+          },
           "checkout": {
             "type": "boolean",
-            "description": "Assistant provide a summary of the booking cancellation and ask if the user wants to confirm the cancellation"
+            "description": "Assistant provided a detailed summary checkout of the booking cancellation and ask if the user want to confirm the cancellation"
           },
           "confirmation": {
             "type": "boolean",
-            "description": "The user cofirmed the last checkout cancellation should be true"
+            "description": "The user explictly confirm the information of the meeting cancellation after the cancellation checkout provided by the assistant"
           }
         },
-        "required": ["date", "time", "checkout", "confirmation"],
+        "required": ["date", "time", "name", "email", "checkout", "confirmation"],
         "additionalProperties": false
       },
       "strict": true
     }
   }];
+
+// Add Gmail scope to existing calendar scope
+const SCOPES = [
+  'https://www.googleapis.com/auth/calendar',
+  'https://www.googleapis.com/auth/gmail.send'
+];
+
+// Update oauth2Client initialization to include both scopes
+const oauth2Client = new OAuth2Client(
+  process.env.GOOGLE_CLIENT_ID,
+  process.env.GOOGLE_CLIENT_SECRET,
+  process.env.GOOGLE_REDIRECT_URI
+);
+
+// Set credentials right after initialization
+if (process.env.GOOGLE_REFRESH_TOKEN) {
+  oauth2Client.setCredentials({
+    refresh_token: process.env.GOOGLE_REFRESH_TOKEN
+  });
+} else {
+  console.warn('Warning: GOOGLE_REFRESH_TOKEN not set in environment variables');
+}
 
 // Helper function to get file from S3
 async function getFileFromS3(url) {
@@ -146,6 +178,80 @@ async function uploadFileToS3(buffer, contentType) {
 
   await s3Client.send(command);
   return `https://${process.env.AWS_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${fileName}`;
+}
+
+// Add this function after other helper functions
+async function sendGmail(to, subject, message) {
+  const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+  
+  // Create the email in RFC 822 format
+  const emailLines = [
+    `From: ${process.env.GOOGLE_EMAIL}`,
+    `To: ${to}`,
+    `Subject: ${subject}`,
+    '',
+    message
+  ];
+  
+  const email = emailLines.join('\r\n').trim();
+  
+  // Convert the email to base64 format
+  const base64Email = Buffer.from(email).toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+
+  try {
+    const response = await gmail.users.messages.send({
+      userId: 'me',
+      requestBody: {
+        raw: base64Email
+      }
+    });
+    return response.data;
+  } catch (error) {
+    console.error('Error sending email:', error);
+    throw error;
+  }
+}
+
+// Function to retrieve all events on a day by date and hour
+async function listEvents(date) {
+    return new Promise((resolve, reject) => {
+        const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
+        
+        // Specify the date you want to retrieve events for
+        const timeZone = 'America/Sao_Paulo';
+        
+        // Define timeMin and timeMax for the specified date
+        const timeMin = new Date(`${date}T00:00:00`).toISOString();
+        const timeMax = new Date(`${date}T23:59:59`).toISOString();
+        
+        calendar.events.list(
+            {
+                calendarId: 'primary',
+                timeMin: timeMin,
+                timeMax: timeMax,
+                timeZone: timeZone,
+                singleEvents: true,
+                orderBy: 'startTime',
+            },
+            (err, res) => {
+                if (err) {
+                    reject(err);
+                    return;
+                }
+                
+                const events = res.data.items;
+                const formattedEvents = events.map((event) => ({
+                    start: event.start.dateTime || event.start.date,
+                    summary: event.summary
+                }));
+                
+                resolve(formattedEvents);
+            }
+        );
+    });
 }
 
 const conversationalAgent = async (req, res) => {
@@ -296,7 +402,9 @@ const scheduleAgent = async (req, res) => {
                     name: args.name,
                     email: args.email,
                     company: args.company,
-                    subject: args.subject
+                    subject: args.subject,
+                    checkout: args.checkout,
+                    confirmation: args.confirmation
                   }
                 }, {
                   json: (data) => data,
@@ -347,7 +455,11 @@ const scheduleAgent = async (req, res) => {
                 const cancelResult = await cancelBooking({
                   body: {
                     date: args.date,
-                    time: args.time
+                    time: args.time,
+                    name: args.name,
+                    email: args.email,
+                    checkout: args.checkout,
+                    confirmation: args.confirmation
                   }
                 }, {
                   json: (data) => data,
@@ -399,13 +511,10 @@ const getAllSchedules = async (req, res) => {
 // Internal function for getting schedule by date
 const getScheduleByDateInternal = async (date) => {
   try {
-    //console.log("date", date)
-    // Create date objects and force them to UTC
     const startDate = new Date(date + 'T00:00:00.000Z');
     const endDate = new Date(date + 'T23:59:59.999Z');
 
-    //console.log("startDate", startDate)
-    //console.log("endDate", endDate)
+    // Get MongoDB schedule
     const schedule = await Schedule.findOne({
       date: {
         $gte: startDate,
@@ -413,24 +522,70 @@ const getScheduleByDateInternal = async (date) => {
       }
     });
 
-    return schedule;
+    // Get Google Calendar events
+    const googleEvents = await listEvents(date);
+
+    // Define the standard time slots
+    const standardSlots = [
+      '8:00', '9:00', '10:00', '11:00',
+      '14:00', '15:00', '16:00', '17:00'
+    ];
+
+    // Create formatted slots
+    const formattedSlots = standardSlots.map(time => {
+      // Check Google Calendar events
+      const googleEvent = googleEvents.find(event => {
+        const eventDate = new Date(event.start);
+        const eventHour = eventDate.getHours().toString().padStart(2, '0');
+        const eventMinute = eventDate.getMinutes().toString().padStart(2, '0');
+        const eventTimeString = `${eventHour}:${eventMinute}`;
+        return eventTimeString === time;
+      });
+
+      if (googleEvent) {
+        return {
+          time,
+          name: googleEvent.summary || '',
+          email: '',
+          company: '',
+          subject: googleEvent.summary || '',
+          status: 'booked'
+        };
+      }
+
+      // Check MongoDB schedule
+      const scheduledSlot = schedule?.slots.find(slot => slot.time === time);
+      if (scheduledSlot && scheduledSlot.status === 'booked') {
+        return scheduledSlot;
+      }
+
+      // Return empty slot if no booking found
+      return {
+        time,
+        name: '',
+        email: '',
+        company: '',
+        subject: '',
+        status: 'available'
+      };
+    });
+
+    // Return the formatted structure
+    return {
+      date: startDate,
+      slots: formattedSlots
+    };
   } catch (error) {
     throw error;
   }
 };
 
-// Modified route handler that uses the internal function
+// Now getScheduleByDate can be simplified to:
 const getScheduleByDate = async (req, res) => {
   try {
     const { date } = req.params;
     const schedule = await getScheduleByDateInternal(date);
-    
-    if (!schedule) {
-      return res.status(404).json({ message: 'Não há agendamento disponível para esta data' });
-    }
-
     res.json(schedule);
-
   } catch (error) {
     console.error('Error fetching schedule by date:', error);
     res.status(500).json({ 
@@ -441,61 +596,131 @@ const getScheduleByDate = async (req, res) => {
 };
 
 const bookSlot = async (req, res) => {
-  try {
-    const { date, time, name, email, company, subject } = req.body;
+
+  const { date, time, name, email, company, subject, checkout, confirmation } = req.body;
+
+  if(checkout && confirmation) {
+    try {
     
-    // Add 3 hour to the nes date
-    const newDate = new Date(date);
-    newDate.setHours(newDate.getHours() + 3);
-
-    const schedule = await Schedule.findOne({
-      date: newDate
-    });
-    // console.log(schedule)
-
-    if (!schedule) {
-      return res.status(404).json({ message: 'Schedule not found for this date' });
-    }
-
-    const slot = schedule.slots.find(slot => slot.time === time);
-    if (!slot) {
-      return res.status(404).json({ message: 'Time slot not found' });
-    }
-
-    if (slot.status === 'booked') {
-      return res.status(400).json({ message: 'This slot is already booked' });
-    }
     
-    slot.name = name;
-    slot.email = email;
-    slot.company = company;
-    slot.subject = subject;
-    slot.status = 'booked';
+        // Add 3 hour to the new date
+        const newDate = new Date(date);
+        newDate.setHours(newDate.getHours() + 3);
+    
+        const schedule = await Schedule.findOne({
+          date: newDate
+        });
+    
+        if (!schedule) {
+          return res.status(404).json({ message: 'Schedule not found for this date' });
+        }
+    
+        const slot = schedule.slots.find(slot => slot.time === time);
+        if (!slot) {
+          return res.status(404).json({ message: 'Time slot not found' });
+        }
+    
+        if (slot.status === 'booked') {
+          return res.status(400).json({ message: 'This slot is already booked' });
+        }
+    
+        // Save to MongoDB
+        slot.name = name;
+        slot.email = email;
+        slot.company = company;
+        slot.subject = subject;
+        slot.status = 'booked';
+    
+        await schedule.save();
+    
+        // Add to Google Calendar
+        try {
+          // Set credentials from environment variables
+          oauth2Client.setCredentials({
+            refresh_token: process.env.GOOGLE_REFRESH_TOKEN
+          });
+    
+          const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
+    
+          // Create DateTime strings for the event
+          const startDateTime = new Date(`${date}T${time}`);
+          const endDateTime = new Date(startDateTime.getTime() + 60 * 60000); // 1 hour duration
+    
+          const event = {
+            summary: subject,
+            description: `Meeting with ${name} from ${company}`,
+            start: {
+              dateTime: startDateTime.toISOString(),
+              timeZone: 'America/Sao_Paulo',
+            },
+            end: {
+              dateTime: endDateTime.toISOString(),
+              timeZone: 'America/Sao_Paulo',
+            },
+            attendees: [
+              { email: email }
+            ],
+          };
+    
+          const googleEvent = await calendar.events.insert({
+            calendarId: 'primary',
+            resource: event,
+            sendUpdates: 'all', // Sends email notifications to attendees
+          });
 
-    await schedule.save();
-    res.json({ message: 'Slot booked successfully', schedule });
-  } catch (error) {
-    console.error('Error booking slot:', error);
-    res.status(500).json({ 
-      error: 'Internal server error', 
-      message: error.message 
-    });
-  }
+          console.log(googleEvent)
+    
+          // After successful booking, send confirmation email
+          try {
+            await sendGmail(
+              email,
+              'Meeting Confirmation',
+              `Your meeting "${subject}" has been scheduled for ${date} at ${time}.\n\nBest regards,\nYour Scheduling System`
+            );
+          } catch (emailError) {
+            console.error('Error sending confirmation email:', emailError);
+          }
+    
+          // Return success with both MongoDB and Google Calendar data
+          res.json({ 
+            message: 'Slot booked successfully', 
+            schedule,
+            googleCalendarEvent: googleEvent.data 
+          });
+    
+        } catch (googleError) {
+          console.error('Error adding event to Google Calendar:', googleError);
+          // Still return success since MongoDB save worked
+          res.json({ 
+            message: 'Slot booked successfully in database, but failed to add to Google Calendar', 
+            schedule,
+            googleCalendarError: googleError.message 
+          });
+        }
+    
+      } catch (error) {
+        console.error('Error booking slot:', error);
+        res.status(500).json({ 
+          error: 'Internal server error', 
+          message: error.message 
+        });
+      }
+    } else {
+      return res.status(400).json({ message: 'Checkout and confirmation are required' });
+    }
 };
 
 const cancelBooking = async (req, res) => {
   try {
-    const { date, time } = req.body;
+    const { date, time, name, email, checkout, confirmation } = req.body;
 
-    // Add 3 hour to the nes date
+    // Add 3 hour to the new date
     const newDate = new Date(date);
     newDate.setHours(newDate.getHours() + 3);
 
     const schedule = await Schedule.findOne({
       date: newDate
     });
-
-    console.log(schedule)
 
     if (!schedule) {
       return res.status(404).json({ message: 'Schedule not found for this date' });
@@ -506,6 +731,13 @@ const cancelBooking = async (req, res) => {
       return res.status(404).json({ message: 'Time slot not found' });
     }
 
+    // Store the event details before clearing them
+    const eventDetails = {
+      subject: slot.subject,
+      email: slot.email
+    };
+
+    // Clear the slot in MongoDB
     slot.name = '';
     slot.email = '';
     slot.company = '';
@@ -513,7 +745,65 @@ const cancelBooking = async (req, res) => {
     slot.status = 'available';
 
     await schedule.save();
-    res.json({ message: 'Booking cancelled successfully', schedule });
+
+    // Cancel in Google Calendar
+    try {
+      const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
+
+      // Find the event by time and attendee
+      const startDateTime = new Date(`${date}T${time}`);
+      const endDateTime = new Date(startDateTime.getTime() + 60 * 60000); // 1 hour later
+
+      const events = await calendar.events.list({
+        calendarId: 'primary',
+        timeMin: startDateTime.toISOString(),
+        timeMax: endDateTime.toISOString(),
+        q: eventDetails.subject, // Search by event subject
+        singleEvents: true
+      });
+
+      const eventToCancel = events.data.items.find(event => 
+        event.attendees?.some(attendee => attendee.email === eventDetails.email)
+      );
+
+      if (eventToCancel) {
+        await calendar.events.delete({
+          calendarId: 'primary',
+          eventId: eventToCancel.id,
+          sendUpdates: 'all' // Sends cancellation emails to attendees
+        });
+
+        // After successful cancellation, send notification email
+        try {
+          await sendGmail(
+            eventDetails.email,
+            'Meeting Cancellation',
+            `Your meeting "${eventDetails.subject}" scheduled for ${date} at ${time} has been cancelled.\n\nBest regards,\nYour Scheduling System`
+          );
+        } catch (emailError) {
+          console.error('Error sending cancellation email:', emailError);
+        }
+
+        res.json({ 
+          message: 'Booking cancelled successfully in both database and Google Calendar', 
+          schedule 
+        });
+      } else {
+        res.json({ 
+          message: 'Booking cancelled in database, but no matching Google Calendar event found', 
+          schedule 
+        });
+      }
+
+    } catch (googleError) {
+      console.error('Error cancelling Google Calendar event:', googleError);
+      res.json({ 
+        message: 'Booking cancelled in database, but failed to cancel Google Calendar event', 
+        schedule,
+        googleCalendarError: googleError.message 
+      });
+    }
+
   } catch (error) {
     console.error('Error cancelling booking:', error);
     res.status(500).json({ 
