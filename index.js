@@ -101,9 +101,16 @@ if (isDev) {
 
     // HTTP redirect in production
     http.createServer((req, res) => {
-      res.writeHead(301, { "Location": "https://" + req.headers['host'] + req.url });
+      const host = req.headers.host;
+      // Ensure redirect goes to api.loes.pro
+      const targetHost = 'api.loes.pro';
+      res.writeHead(301, {
+        "Location": `https://${targetHost}${req.url}`
+      });
       res.end();
-    }).listen(80);
+    }).listen(80, () => {
+      console.log('HTTP redirect server running on port 80');
+    });
   } catch (error) {
     console.error('Error starting production server:', error);
     process.exit(1);
